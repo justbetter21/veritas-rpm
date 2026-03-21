@@ -19,14 +19,16 @@ Design principles
 
 Routing logic (proprietary boundary)
 --------------------------------------
-The method ``_select_agents()`` contains a placeholder routing table.  In
-production this would encode the exact rules for which specialist agents should
-be activated for each alert type and what contextual factors (e.g. COPD
-diagnosis) trigger additional agents.  Only the structure is shown here.
+The method ``_select_agents()`` consults a ``RoutingConfig`` that maps
+alert types to agent names.  In production the routing table would encode the
+exact rules for which specialist agents should be activated for each alert
+type and what contextual factors trigger additional agents.
 """
 
 from __future__ import annotations
 
+import logging
+import time
 from typing import Dict, List, Optional
 
 from veritas_rpm.agents.specialist_agents import (
@@ -38,12 +40,15 @@ from veritas_rpm.agents.specialist_agents import (
     SpecialistAgent,
     TachycardiaAgent,
 )
+from veritas_rpm.config import RoutingConfig
 from veritas_rpm.models import (
     AgentClaim,
     AlertType,
     CandidateAlert,
     VeritasRecord,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class DirectorAgent:
@@ -62,7 +67,12 @@ class DirectorAgent:
     claims = director.handle_alert(candidate_alert)
     """
 
-    def __init__(self, meta_sentinel: Optional[object] = None) -> None:
+    def __init__(
+        self,
+        meta_sentinel: Optional[object] = None,
+        routing_config: Optional[RoutingConfig] = None,
+        metrics: Optional[object] = None,
+    ) -> None:
         """
         Parameters
         ----------
@@ -70,8 +80,15 @@ class DirectorAgent:
             A MetaSentinelAgent instance.  If provided, collected AgentClaims
             are automatically forwarded via ``meta_sentinel.aggregate_claims()``.
             Pass None to use DirectorAgent in standalone mode.
+        routing_config:
+            Optional RoutingConfig that maps alert types to agent names.
+            Defaults to the built-in routing table.
+        metrics:
+            A PipelineMetrics instance for recording agent invocation times.
         """
         self._meta_sentinel = meta_sentinel
+        self._routing_config = routing_config or RoutingConfig()
+        self._metrics = metrics
 
         # Instantiate all specialist agents
         self._tachycardia_agent = TachycardiaAgent()
@@ -80,6 +97,19 @@ class DirectorAgent:
         self._nocturnal_agent = NocturnalAgent()
         self._activity_integrity_agent = ActivityIntegrityAgent()
         self._probe_integrity_agent = ProbeIntegrityAgent()
+
+        # Name → instance mapping for config-driven routing
+        self._agent_registry: Dict[str, SpecialistAgent] = {
+            agent.name: agent
+            for agent in [
+                self._tachycardia_agent,
+                self._bradycardia_agent,
+                self._copd_agent,
+                self._nocturnal_agent,
+                self._activity_integrity_agent,
+                self._probe_integrity_agent,
+            ]
+        }
 
         # Maintain a context cache: patient_id → most recent VeritasRecord.
         # DirectorAgent needs the VeritasRecord to pass as context to specialists.
@@ -129,22 +159,14 @@ class DirectorAgent:
         -------
         List[AgentClaim]
             Claims produced by all selected specialist agents.
-
-        Notes
-        -----
-        If no VeritasRecord is available for the patient (update_context has
-        not been called), a minimal empty record is constructed as a fallback
-        so the pipeline does not crash.  In production, this situation should
-        be logged and investigated.
         """
         context = self._context_cache.get(alert.patient_id)
         if context is None:
-            import warnings
-            warnings.warn(
-                f"No VeritasRecord context available for patient '{alert.patient_id}'.  "
+            logger.warning(
+                "No VeritasRecord context available for patient '%s'.  "
                 "Specialist agents will have no EHR/conversation context.  "
                 "Call update_context() before handle_alert() in production.",
-                stacklevel=2,
+                alert.patient_id,
             )
             # Construct a minimal context so agents can still run
             from datetime import datetime, timezone
@@ -166,7 +188,7 @@ class DirectorAgent:
         return claims
 
     # ------------------------------------------------------------------
-    # Agent selection (proprietary routing logic)
+    # Agent selection (config-driven routing logic)
     # ------------------------------------------------------------------
 
     def _select_agents(
@@ -177,22 +199,15 @@ class DirectorAgent:
         """
         Choose which specialist agents should evaluate this alert.
 
-        The routing table maps alert_type to a base set of agents.
-        Additional agents are added when contextual factors (such as a COPD
-        diagnosis) make them relevant.
+        The routing table from ``RoutingConfig`` maps alert_type to a base set
+        of agent names.  Additional agents can be added when contextual factors
+        (such as a COPD diagnosis) make them relevant.
 
         TODO
         ----
-        Replace the placeholder routing rules below with the production
-        routing policy:
-
-        - Define exactly which agents handle each alert_type.
-        - Add conditional logic: e.g. if 'COPD' in ehr_data.diagnoses, always
-          include COPDAgent for desaturation and flatline alerts.
-        - Add confidence-based routing: e.g. if signal quality is poor, always
-          include ProbeIntegrityAgent regardless of alert_type.
-        - Consider alert provenance: if only device_stream is available (no
-          EHR or conversation context), adjust which agents are useful.
+        Add context-based conditional routing in a production deployment:
+        - If 'COPD' in ehr_data.diagnoses, always include COPDAgent.
+        - If signal quality is poor, always include ProbeIntegrityAgent.
 
         Parameters
         ----------
@@ -206,56 +221,31 @@ class DirectorAgent:
         List[SpecialistAgent]
             The subset of agents to invoke.
         """
-        # Default routing table (placeholder — not clinically tuned)
-        routing: Dict[str, List[SpecialistAgent]] = {
-            "tachycardia": [
-                self._tachycardia_agent,
-                self._activity_integrity_agent,
-                self._probe_integrity_agent,
-            ],
-            "bradycardia": [
-                self._bradycardia_agent,
-                self._nocturnal_agent,
-            ],
-            "desaturation": [
-                self._probe_integrity_agent,
-                self._copd_agent,
-                self._nocturnal_agent,
-            ],
-            "flatline": [
-                self._probe_integrity_agent,
-            ],
-            "nocturnal_event": [
-                self._nocturnal_agent,
-                self._copd_agent,
-                self._probe_integrity_agent,
-            ],
-            "probe_issue": [
-                self._probe_integrity_agent,
-                self._activity_integrity_agent,
-            ],
-            "activity_spike": [
-                self._activity_integrity_agent,
-                self._tachycardia_agent,
-            ],
-            "other": [
-                self._tachycardia_agent,
-                self._bradycardia_agent,
-                self._probe_integrity_agent,
-            ],
-        }
-
-        base_agents = routing.get(alert.alert_type, [])
+        agent_names = self._routing_config.routing_table.get(
+            alert.alert_type, []
+        )
+        agents: List[SpecialistAgent] = []
+        for name in agent_names:
+            agent = self._agent_registry.get(name)
+            if agent is not None:
+                agents.append(agent)
+            else:
+                logger.warning(
+                    "Routing table references unknown agent '%s' for "
+                    "alert_type '%s'",
+                    name,
+                    alert.alert_type,
+                )
 
         # TODO: Add context-based conditional routing.
         # Example (placeholder — exact conditions are proprietary):
         #
         # diagnoses = [d.lower() for d in context.ehr_data.diagnoses]
         # if any("copd" in d for d in diagnoses):
-        #     if self._copd_agent not in base_agents:
-        #         base_agents = base_agents + [self._copd_agent]
+        #     if self._copd_agent not in agents:
+        #         agents.append(self._copd_agent)
 
-        return base_agents
+        return agents
 
     # ------------------------------------------------------------------
     # Agent invocation
@@ -290,14 +280,20 @@ class DirectorAgent:
         """
         claims: List[AgentClaim] = []
         for agent in agents:
+            t0 = time.perf_counter()
             try:
                 claim = agent.evaluate(alert, context)
                 claims.append(claim)
             except Exception as exc:  # noqa: BLE001
-                import warnings
-                warnings.warn(
-                    f"Agent '{agent.name}' raised an exception while evaluating "
-                    f"alert '{alert.alert_id}': {exc}",
-                    stacklevel=2,
+                logger.exception(
+                    "Agent '%s' raised an exception while evaluating "
+                    "alert '%s': %s",
+                    agent.name,
+                    alert.alert_id,
+                    exc,
                 )
+            finally:
+                elapsed_ms = (time.perf_counter() - t0) * 1000
+                if self._metrics is not None:
+                    self._metrics.record_agent_invocation(agent.name, elapsed_ms)
         return claims

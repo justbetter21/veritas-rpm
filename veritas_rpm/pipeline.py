@@ -8,9 +8,9 @@ object.  It is the main entry point for running the pipeline end-to-end.
 
 Typical usage
 -------------
-    from veritas_rpm import RPMPipeline
+    from veritas_rpm import RPMPipeline, PipelineConfig
 
-    pipeline = RPMPipeline()
+    pipeline = RPMPipeline(config=PipelineConfig())
 
     # Feed raw data for a patient
     pipeline.ingest_ehr("patient-001", ehr_dict)
@@ -23,6 +23,9 @@ Typical usage
     # Retrieve queued nurse alerts
     nurse_queue = pipeline.dashboard.get_nurse_queue()
 
+    # Inspect pipeline metrics
+    print(pipeline.metrics.summary())
+
 The pipeline instantiates and owns all components:
     VeritasAgent → SentinelLayer → DirectorAgent → MetaSentinelAgent → DashboardService
 
@@ -33,12 +36,14 @@ replace any component with a mock when constructing RPMPipeline.
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Any
+from typing import Any, Dict, List, Optional
 
 from veritas_rpm.agents.director_agent import DirectorAgent
 from veritas_rpm.agents.meta_sentinel_agent import MetaSentinelAgent
 from veritas_rpm.agents.sentinel_layer import SentinelLayer
 from veritas_rpm.agents.veritas_agent import VeritasAgent
+from veritas_rpm.config import PipelineConfig
+from veritas_rpm.metrics import PipelineMetrics
 from veritas_rpm.models import (
     AgentClaim,
     CandidateAlert,
@@ -73,10 +78,13 @@ class RPMPipeline:
         pipeline.director    — DirectorAgent
         pipeline.meta        — MetaSentinelAgent
         pipeline.dashboard   — DashboardService
+        pipeline.metrics     — PipelineMetrics
     """
 
     def __init__(
         self,
+        config: Optional[PipelineConfig] = None,
+        # Legacy parameter — prefer config
         cooldown_minutes: Optional[Dict[str, int]] = None,
     ) -> None:
         """
@@ -84,22 +92,40 @@ class RPMPipeline:
 
         Parameters
         ----------
+        config:
+            Optional PipelineConfig controlling cooldown durations,
+            routing table, and other tuneable parameters.
         cooldown_minutes:
-            Optional cooldown configuration forwarded to MetaSentinelAgent.
-            Keys: 'doctor', 'nurse', 'patient'.  Values: minutes.
+            Legacy parameter.  Deprecated in favour of ``config``.
         """
+        if config is None:
+            config = PipelineConfig()
+
+        self.metrics = PipelineMetrics()
+
         # Instantiate components bottom-up so dependencies can be injected.
 
         self.dashboard = DashboardService()
 
+        # Legacy cooldown_minutes takes precedence over config.cooldown
+        # when explicitly provided, for backward compatibility.
         self.meta = MetaSentinelAgent(
+            cooldown_config=config.cooldown if cooldown_minutes is None else None,
             cooldown_minutes=cooldown_minutes,
             dashboard_service=self.dashboard,
+            metrics=self.metrics,
         )
 
-        self.director = DirectorAgent(meta_sentinel=self.meta)
+        self.director = DirectorAgent(
+            meta_sentinel=self.meta,
+            routing_config=config.routing,
+            metrics=self.metrics,
+        )
 
-        self.sentinel = SentinelLayer(director=self.director)
+        self.sentinel = SentinelLayer(
+            director=self.director,
+            metrics=self.metrics,
+        )
 
         self.veritas = VeritasAgent()
 
@@ -180,3 +206,7 @@ class RPMPipeline:
             + self.dashboard.get_nurse_queue()
             + self.dashboard.get_doctor_queue()
         )
+
+    def get_metrics_summary(self) -> Dict[str, Any]:
+        """Return a JSON-serialisable snapshot of all pipeline metrics."""
+        return self.metrics.summary()

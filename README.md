@@ -85,7 +85,12 @@ Ground-Truth Sources
 veritas_rpm/
 ├── __init__.py                 Package init; exports public API
 ├── models.py                   Pydantic data models for all four core objects
-├── pipeline.py                 RPMPipeline — top-level orchestrator
+├── config.py                   Configuration dataclasses (PipelineConfig, CooldownConfig,
+│                               RoutingConfig)
+├── exceptions.py               Custom exception hierarchy (VeritasRPMError, …)
+├── metrics.py                  Pipeline-level metrics (PipelineMetrics)
+├── pipeline.py                 RPMPipeline — top-level synchronous orchestrator
+├── async_pipeline.py           AsyncRPMPipeline — async variant for event-loop apps
 ├── agents/
 │   ├── __init__.py
 │   ├── veritas_agent.py        Ingests raw sources; emits VeritasRecord
@@ -99,8 +104,10 @@ veritas_rpm/
     ├── __init__.py
     └── dashboard_service.py    Routes decisions to patient / nurse / doctor
 
+tests/                          Pytest test suite (73 tests)
 example.py                      Runnable demonstration with 4 synthetic scenarios
 requirements.txt                Python dependencies (pydantic only)
+requirements-dev.txt            Dev dependencies (pytest, pytest-asyncio)
 README.md                       This file
 ```
 
@@ -132,6 +139,137 @@ python example.py
 
 This runs four synthetic scenarios through the full pipeline and prints the
 resulting `SystemDecision` objects to the terminal.
+
+### Run the tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest tests/ -v
+```
+
+---
+
+## Configuration
+
+All tuneable parameters are centralised in `PipelineConfig`:
+
+```python
+from veritas_rpm import RPMPipeline, PipelineConfig
+from veritas_rpm.config import CooldownConfig, RoutingConfig
+
+config = PipelineConfig(
+    cooldown=CooldownConfig(
+        doctor_minutes=60,
+        nurse_minutes=20,
+        patient_minutes=10,
+    ),
+    routing=RoutingConfig(
+        routing_table={
+            "tachycardia": ["TachycardiaAgent", "ActivityIntegrityAgent"],
+            "desaturation": ["ProbeIntegrityAgent", "COPDAgent"],
+            # ... add or remove agent mappings as needed
+        },
+    ),
+)
+
+pipeline = RPMPipeline(config=config)
+```
+
+### Configuration classes
+
+| Class | Purpose | Key fields |
+|---|---|---|
+| `PipelineConfig` | Top-level container | `cooldown`, `routing` |
+| `CooldownConfig` | Per-role cooldown durations | `doctor_minutes`, `nurse_minutes`, `patient_minutes` |
+| `RoutingConfig` | Maps alert types to specialist agent names | `routing_table` (Dict[str, List[str]]) |
+
+---
+
+## Logging
+
+The library uses Python's standard `logging` module.  No log handlers are
+configured by the library itself — the caller controls output format and level:
+
+```python
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+)
+
+pipeline = RPMPipeline()
+# All pipeline components now emit structured log messages
+```
+
+---
+
+## Error Handling
+
+Custom exceptions are defined in `veritas_rpm.exceptions`:
+
+| Exception | Raised when |
+|---|---|
+| `VeritasRPMError` | Base class for all package exceptions |
+| `NoDataIngestedError` | `build_record()` called before any `ingest_*()` method |
+| `InvalidRoleError` | An unknown role string is passed to `acknowledge()` |
+| `ValidationError` | Input data fails validation (empty patient_id, wrong types, etc.) |
+| `AgentEvaluationError` | A specialist agent fails during evaluation |
+
+All exceptions inherit from `VeritasRPMError`, so callers can catch the full
+family with a single `except VeritasRPMError` clause.
+
+---
+
+## Async Support
+
+For event-loop-based applications (FastAPI, aiohttp, etc.), use `AsyncRPMPipeline`:
+
+```python
+import asyncio
+from veritas_rpm.async_pipeline import AsyncRPMPipeline
+
+async def main():
+    pipeline = AsyncRPMPipeline()
+    pipeline.ingest_ehr("patient-001", ehr_dict)
+    pipeline.ingest_vitals("patient-001", vitals_dict)
+
+    record = await pipeline.process("patient-001")
+    print(pipeline.get_all_decisions())
+
+asyncio.run(main())
+```
+
+The sync `RPMPipeline` remains fully supported and is recommended for scripts,
+notebooks, and batch processing.
+
+---
+
+## Metrics
+
+Each pipeline instance tracks operational metrics via `PipelineMetrics`:
+
+```python
+pipeline = RPMPipeline()
+# ... ingest and process patients ...
+
+summary = pipeline.get_metrics_summary()
+# {
+#     "alerts_generated": 12,
+#     "alerts_suppressed": 3,
+#     "alerts_delivered": 9,
+#     "suppression_rate": 0.25,
+#     "decisions_by_action": {"queue_for_nurse": 7, "suppress": 3, ...},
+#     "decisions_by_priority": {"normal": 8, "low": 4},
+#     "agent_invocation_count": {"TachycardiaAgent": 5, ...},
+#     "agent_total_time_ms": {"TachycardiaAgent": 1.23, ...},
+# }
+```
+
+Metrics are useful for:
+- Monitoring suppression rates to tune cooldown parameters.
+- Identifying slow specialist agents.
+- Tracking alert volume across pipeline runs.
 
 ---
 
@@ -217,7 +355,12 @@ pipeline.director._tachycardia_agent = MyTachycardiaAgent()
 ### Adjusting cooldown windows
 
 ```python
-pipeline = RPMPipeline(cooldown_minutes={"doctor": 60, "nurse": 20, "patient": 10})
+from veritas_rpm import RPMPipeline, PipelineConfig
+from veritas_rpm.config import CooldownConfig
+
+pipeline = RPMPipeline(config=PipelineConfig(
+    cooldown=CooldownConfig(doctor_minutes=60, nurse_minutes=20, patient_minutes=10),
+))
 ```
 
 ### Receiving decisions via callback
@@ -240,6 +383,8 @@ pipeline.meta.on_decision(lambda d: print(f"Decision: {d.final_action} → {d.ta
 4. **Pluggable clinical logic** — all proprietary rules live behind `# TODO`
    markers and abstract interfaces.  The framework can be adopted without
    revealing any existing production logic.
+5. **Observable by design** — structured logging, pipeline metrics, and audit
+   trails support monitoring and debugging in production environments.
 
 ---
 
