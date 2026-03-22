@@ -38,6 +38,7 @@ reference implementation demonstrates the method signatures and data flow only.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional
@@ -50,6 +51,8 @@ from veritas_rpm.models import (
     ProvenanceTag,
     VeritasRecord,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class SentinelLayer:
@@ -69,7 +72,11 @@ class SentinelLayer:
     alerts = sentinel.generate_candidate_alerts(list_of_records)
     """
 
-    def __init__(self, director: Optional[object] = None) -> None:
+    def __init__(
+        self,
+        director: Optional[object] = None,
+        metrics: Optional[object] = None,
+    ) -> None:
         """
         Parameters
         ----------
@@ -77,8 +84,11 @@ class SentinelLayer:
             A DirectorAgent instance.  If provided, detected alerts are
             automatically forwarded via ``director.handle_alert()``.
             Pass None to use SentinelLayer in standalone mode.
+        metrics:
+            A PipelineMetrics instance for recording alert counts.
         """
         self._director = director
+        self._metrics = metrics
 
     # ------------------------------------------------------------------
     # Public interface
@@ -160,6 +170,13 @@ class SentinelLayer:
             alert = detector(record)
             if alert is not None:
                 alerts.append(alert)
+                if self._metrics is not None:
+                    self._metrics.record_alert_generated()
+                logger.info(
+                    "Alert detected: type=%s patient=%s",
+                    alert.alert_type,
+                    alert.patient_id,
+                )
 
         return alerts
 

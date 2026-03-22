@@ -23,6 +23,7 @@ but the SystemDecisions produced are placeholder outputs.
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timezone
 
 from veritas_rpm import RPMPipeline
@@ -328,6 +329,12 @@ def demonstrate_feedback_loop(pipeline: RPMPipeline, patient_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    # Configure logging so library messages are visible in the demo
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+    )
+
     print()
     print("Veritas-RPM Reference Pipeline — Synthetic Demonstration")
     print("=" * 70)
@@ -360,6 +367,17 @@ if __name__ == "__main__":
                 )
         else:
             print(f"  {label:<40}  (no decisions generated)")
+
+    # Show metrics for each pipeline
+    section("Pipeline Metrics")
+    for label, pipeline in [
+        ("Scenario 1", p1),
+        ("Scenario 2", p2),
+        ("Scenario 3", p3),
+        ("Scenario 4", p4),
+    ]:
+        metrics = pipeline.get_metrics_summary()
+        print(f"\n  {label}: {metrics}")
 
     print()
     print("Run complete.  See veritas_rpm/ for full source code and TODOs.")

@@ -10,7 +10,12 @@ Package layout
 veritas_rpm/
     models.py                   Core data models (VeritasRecord, CandidateAlert,
                                 AgentClaim, SystemDecision)
+    config.py                   Configuration dataclasses (PipelineConfig, CooldownConfig,
+                                RoutingConfig)
+    exceptions.py               Custom exception hierarchy (VeritasRPMError, …)
+    metrics.py                  Pipeline-level metrics (PipelineMetrics)
     pipeline.py                 Top-level orchestrator that wires all agents together
+    async_pipeline.py           Async variant of the pipeline orchestrator
     agents/
         veritas_agent.py        Ingests the four ground-truth sources; emits VeritasRecord
         sentinel_layer.py       Detects candidate issues; emits CandidateAlert
@@ -27,12 +32,39 @@ from veritas_rpm.models import (
     AgentClaim,
     SystemDecision,
 )
+from veritas_rpm.config import (
+    PipelineConfig,
+    CooldownConfig,
+    RoutingConfig,
+)
+from veritas_rpm.exceptions import (
+    VeritasRPMError,
+    NoDataIngestedError,
+    InvalidRoleError,
+    ValidationError,
+    AgentEvaluationError,
+)
+from veritas_rpm.metrics import PipelineMetrics
 from veritas_rpm.pipeline import RPMPipeline
 
 __all__ = [
+    # Models
     "VeritasRecord",
     "CandidateAlert",
     "AgentClaim",
     "SystemDecision",
+    # Config
+    "PipelineConfig",
+    "CooldownConfig",
+    "RoutingConfig",
+    # Exceptions
+    "VeritasRPMError",
+    "NoDataIngestedError",
+    "InvalidRoleError",
+    "ValidationError",
+    "AgentEvaluationError",
+    # Metrics
+    "PipelineMetrics",
+    # Pipeline
     "RPMPipeline",
 ]

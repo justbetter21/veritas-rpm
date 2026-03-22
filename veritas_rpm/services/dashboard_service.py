@@ -32,11 +32,15 @@ the SystemDecision it receives.
 
 from __future__ import annotations
 
+import logging
 from collections import deque
 from datetime import datetime, timezone
 from typing import Callable, Deque, Dict, List, Optional
 
+from veritas_rpm.exceptions import InvalidRoleError
 from veritas_rpm.models import SystemDecision
+
+logger = logging.getLogger(__name__)
 
 
 class DashboardService:
@@ -144,10 +148,10 @@ class DashboardService:
         """
         self._patient_queue.append(decision)
         self._log_delivery(decision, "delivered_to_patient")
-        print(
-            f"[DashboardService] PATIENT NOTIFICATION — "
-            f"alert_id={decision.alert_id}  "
-            f"priority={decision.priority}"
+        logger.info(
+            "PATIENT NOTIFICATION — alert_id=%s  priority=%s",
+            decision.alert_id,
+            decision.priority,
         )
 
     def queue_for_nurse(self, decision: SystemDecision) -> None:
@@ -165,11 +169,11 @@ class DashboardService:
         """
         self._nurse_queue.append(decision)
         self._log_delivery(decision, "queued_for_nurse")
-        print(
-            f"[DashboardService] NURSE QUEUE — "
-            f"alert_id={decision.alert_id}  "
-            f"priority={decision.priority}  "
-            f"queue_depth={len(self._nurse_queue)}"
+        logger.info(
+            "NURSE QUEUE — alert_id=%s  priority=%s  queue_depth=%d",
+            decision.alert_id,
+            decision.priority,
+            len(self._nurse_queue),
         )
 
     def escalate_to_doctor(self, decision: SystemDecision) -> None:
@@ -187,11 +191,11 @@ class DashboardService:
         """
         self._doctor_queue.append(decision)
         self._log_delivery(decision, "escalated_to_doctor")
-        print(
-            f"[DashboardService] DOCTOR ESCALATION — "
-            f"alert_id={decision.alert_id}  "
-            f"priority={decision.priority}  "
-            f"cooldown_until={decision.cooldown_until}"
+        logger.warning(
+            "DOCTOR ESCALATION — alert_id=%s  priority=%s  cooldown_until=%s",
+            decision.alert_id,
+            decision.priority,
+            decision.cooldown_until,
         )
 
     # ------------------------------------------------------------------
@@ -224,6 +228,11 @@ class DashboardService:
         role:
             The role of the acknowledging clinician ('patient', 'nurse',
             or 'doctor').
+
+        Raises
+        ------
+        InvalidRoleError
+            If role is not one of 'patient', 'nurse', or 'doctor'.
         """
         queue_map = {
             "patient": self._patient_queue,
@@ -232,7 +241,9 @@ class DashboardService:
         }
         queue = queue_map.get(role)
         if queue is None:
-            raise ValueError(f"Unknown role: '{role}'.  Must be patient, nurse, or doctor.")
+            raise InvalidRoleError(
+                f"Unknown role: '{role}'.  Must be patient, nurse, or doctor."
+            )
 
         # Find and remove from queue
         for i, decision in enumerate(queue):
@@ -246,15 +257,17 @@ class DashboardService:
                     "role": role,
                     "acknowledged_at": datetime.now(timezone.utc).isoformat(),
                 }
-                print(
-                    f"[DashboardService] ACKNOWLEDGED by {role} — "
-                    f"alert_id={alert_id}"
+                logger.info(
+                    "ACKNOWLEDGED by %s — alert_id=%s",
+                    role,
+                    alert_id,
                 )
                 return
 
-        print(
-            f"[DashboardService] WARNING: alert_id={alert_id} not found in "
-            f"{role} queue (may already be acknowledged)."
+        logger.warning(
+            "alert_id=%s not found in %s queue (may already be acknowledged).",
+            alert_id,
+            role,
         )
 
     # ------------------------------------------------------------------
@@ -296,9 +309,7 @@ class DashboardService:
             data_corrections are supplied, so VeritasAgent can apply the
             right patient's overrides.
         """
-        print(
-            f"[DashboardService] FEEDBACK — alert_id={alert_id}  label={label}"
-        )
+        logger.info("FEEDBACK — alert_id=%s  label=%s", alert_id, label)
 
         # Forward outcome label to MetaSentinelAgent for monitoring
         if self._meta_sentinel is not None:
@@ -307,19 +318,18 @@ class DashboardService:
         # Forward provenance corrections to VeritasAgent
         if data_corrections and self._veritas_agent is not None:
             if patient_id is None:
-                import warnings
-                warnings.warn(
+                logger.warning(
                     "data_corrections supplied without patient_id — "
-                    "provenance corrections cannot be applied without a patient_id.",
-                    stacklevel=2,
+                    "provenance corrections cannot be applied without a patient_id."
                 )
             else:
                 self._veritas_agent.update_provenance_override(
                     patient_id, data_corrections  # type: ignore[arg-type]
                 )
-                print(
-                    f"[DashboardService] Provenance updated for patient "
-                    f"'{patient_id}': {data_corrections}"
+                logger.info(
+                    "Provenance updated for patient '%s': %s",
+                    patient_id,
+                    data_corrections,
                 )
 
     # ------------------------------------------------------------------

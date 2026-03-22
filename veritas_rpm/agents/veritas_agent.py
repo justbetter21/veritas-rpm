@@ -31,10 +31,12 @@ without any external infrastructure.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterator, List, Optional
 
+from veritas_rpm.exceptions import NoDataIngestedError, ValidationError
 from veritas_rpm.models import (
     CandidateAlert,
     ConversationData,
@@ -44,6 +46,24 @@ from veritas_rpm.models import (
     VeritasRecord,
     VitalSigns,
 )
+
+logger = logging.getLogger(__name__)
+
+
+def _validate_patient_id(patient_id: str) -> None:
+    """Raise ValidationError if patient_id is not a non-empty string."""
+    if not isinstance(patient_id, str) or not patient_id.strip():
+        raise ValidationError(
+            f"patient_id must be a non-empty string, got {patient_id!r}"
+        )
+
+
+def _validate_raw_dict(raw: Any, label: str) -> None:
+    """Raise ValidationError if raw is not a dict."""
+    if not isinstance(raw, dict):
+        raise ValidationError(
+            f"{label} must be a dict, got {type(raw).__name__}"
+        )
 
 
 class VeritasAgent:
@@ -121,12 +141,19 @@ class VeritasAgent:
             Dict matching the EHRData schema (diagnoses, medications,
             baseline_spo2, baseline_hr, recent_admissions, …).
 
-        Notes
-        -----
-        EHR data is treated as EHR_verified unless overridden.  In a real
-        system this method would validate the data against the EHR schema and
-        raise on unexpected fields.
+        Raises
+        ------
+        ValidationError
+            If patient_id is empty or raw is not a dict.
         """
+        _validate_patient_id(patient_id)
+        _validate_raw_dict(raw, "ehr raw data")
+
+        if "diagnoses" in raw and not isinstance(raw["diagnoses"], list):
+            raise ValidationError("ehr_data.diagnoses must be a list")
+        if "medications" in raw and not isinstance(raw["medications"], list):
+            raise ValidationError("ehr_data.medications must be a list")
+
         self._ehr_cache[patient_id] = raw
 
     def ingest_conversation(self, patient_id: str, raw: Dict[str, Any]) -> None:
@@ -141,13 +168,13 @@ class VeritasAgent:
             Dict matching the ConversationData schema (symptoms, activities,
             adherence_notes, …).
 
-        Notes
-        -----
-        Conversation data provenance is typically LLM_extracted_* because the
-        symptoms and activities are usually extracted by a language model from
-        free-text transcripts.  The exact tag depends on whether a second
-        extraction pass confirmed the result.
+        Raises
+        ------
+        ValidationError
+            If patient_id is empty or raw is not a dict.
         """
+        _validate_patient_id(patient_id)
+        _validate_raw_dict(raw, "conversation raw data")
         self._conversation_cache[patient_id] = raw
 
     def ingest_vitals(self, patient_id: str, raw: Dict[str, Any]) -> None:
@@ -162,13 +189,23 @@ class VeritasAgent:
             Dict matching the VitalSigns schema (hr, spo2, resp_rate,
             signal_quality, activity_level, …).
 
-        Notes
-        -----
-        Device data is always tagged device_stream.  Missing values (None)
-        should be left as None rather than filled with defaults, because
-        downstream agents treat None as "unknown" — distinct from a measured
-        value of zero.
+        Raises
+        ------
+        ValidationError
+            If patient_id is empty, raw is not a dict, or numeric fields
+            contain invalid values.
         """
+        _validate_patient_id(patient_id)
+        _validate_raw_dict(raw, "vitals raw data")
+
+        for numeric_field in ("hr", "spo2", "resp_rate"):
+            value = raw.get(numeric_field)
+            if value is not None and (not isinstance(value, (int, float)) or value < 0):
+                raise ValidationError(
+                    f"vital_signs.{numeric_field} must be a non-negative number "
+                    f"or None, got {value!r}"
+                )
+
         self._vitals_cache[patient_id] = raw
 
     def ingest_patient_input(
@@ -184,14 +221,13 @@ class VeritasAgent:
         raw:
             Dict matching the PatientInput schema (free_text, symptom_severity).
 
-        Notes
-        -----
-        Patient input is tagged human_confirmed because it represents the
-        patient's own real-time account.  Agents are expected to treat this
-        as high-priority context — for example a statement like 'probe fell
-        off' should cause ProbeIntegrityAgent to suppress a false-positive
-        desaturation alert.
+        Raises
+        ------
+        ValidationError
+            If patient_id is empty or raw is not a dict.
         """
+        _validate_patient_id(patient_id)
+        _validate_raw_dict(raw, "patient_input raw data")
         self._patient_input_cache[patient_id] = raw
 
     # ------------------------------------------------------------------
@@ -233,10 +269,7 @@ class VeritasAgent:
         Apply a batch of provenance overrides for a patient.
 
         Typically called by DashboardService when a clinician reviews and
-        confirms or corrects data — for example confirming that a patient
-        does have COPD (elevating 'ehr_data.diagnoses' to 'human_confirmed')
-        or marking that a probe was physically faulty ('vital_signs.spo2'
-        to 'human_confirmed' with a note).
+        confirms or corrects data.
 
         Parameters
         ----------
@@ -275,7 +308,7 @@ class VeritasAgent:
 
         Raises
         ------
-        ValueError
+        NoDataIngestedError
             If no data at all has been ingested for the given patient_id.
         """
         ehr_raw = self._ehr_cache.get(patient_id, {})
@@ -284,7 +317,7 @@ class VeritasAgent:
         input_raw = self._patient_input_cache.get(patient_id, {})
 
         if not any([ehr_raw, conv_raw, vitals_raw, input_raw]):
-            raise ValueError(
+            raise NoDataIngestedError(
                 f"No data has been ingested for patient_id='{patient_id}'.  "
                 "Call at least one ingest_*() method before build_record()."
             )

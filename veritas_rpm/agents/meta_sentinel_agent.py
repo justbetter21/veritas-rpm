@@ -23,9 +23,10 @@ window, it is withheld unless the risk is 'critical'.  This protects clinicians
 from continuous interruption while ensuring that genuinely critical events
 are never suppressed.
 
-The cooldown duration is a configurable parameter (default: 30 minutes for
-doctor-level alerts, 15 minutes for nurse-level).  These defaults are placeholders
-— the exact values used in production are considered proprietary configuration.
+The cooldown duration is configurable via ``CooldownConfig`` (default: 30
+minutes for doctor-level alerts, 15 minutes for nurse-level).  These defaults
+are placeholders — the exact values used in production are considered
+proprietary configuration.
 
 Proprietary boundary
 --------------------
@@ -37,10 +38,12 @@ claims.  Only the input/output contract is defined here.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
+from veritas_rpm.config import CooldownConfig
 from veritas_rpm.models import (
     AgentClaim,
     CandidateAlert,
@@ -51,13 +54,7 @@ from veritas_rpm.models import (
     TargetRole,
 )
 
-
-# Default cooldown durations (placeholder values — not clinically validated)
-_DEFAULT_COOLDOWNS: Dict[str, int] = {
-    "doctor": 30,   # minutes
-    "nurse": 15,    # minutes
-    "patient": 5,   # minutes
-}
+logger = logging.getLogger(__name__)
 
 
 class MetaSentinelAgent:
@@ -73,7 +70,7 @@ class MetaSentinelAgent:
     #   meta.aggregate_claims(alert, claims)
 
     # To receive the resulting SystemDecision, register a callback:
-    meta.on_decision(lambda d: print(d))
+    meta.on_decision(lambda d: logger.info(d))
 
     # Or use in standalone mode:
     decision = meta.aggregate_claims(alert, claims)
@@ -87,22 +84,37 @@ class MetaSentinelAgent:
 
     def __init__(
         self,
-        cooldown_minutes: Optional[Dict[str, int]] = None,
+        cooldown_config: Optional[CooldownConfig] = None,
         dashboard_service: Optional[object] = None,
+        metrics: Optional[object] = None,
+        # Legacy parameter — prefer cooldown_config
+        cooldown_minutes: Optional[Dict[str, int]] = None,
     ) -> None:
         """
         Parameters
         ----------
-        cooldown_minutes:
-            Optional dict mapping target role ('doctor', 'nurse', 'patient')
-            to cooldown duration in minutes.  Defaults to _DEFAULT_COOLDOWNS.
+        cooldown_config:
+            Optional CooldownConfig dataclass.  Takes precedence over
+            ``cooldown_minutes`` if both are provided.
         dashboard_service:
             A DashboardService instance.  If provided, each SystemDecision is
             automatically routed via ``dashboard_service.route_decision()``.
             Pass None to use MetaSentinelAgent in standalone mode.
+        metrics:
+            A PipelineMetrics instance for recording decision counts.
+        cooldown_minutes:
+            Legacy dict mapping target role to cooldown duration in minutes.
+            Deprecated in favour of ``cooldown_config``.
         """
-        self._cooldown_minutes = cooldown_minutes or dict(_DEFAULT_COOLDOWNS)
+        if cooldown_config is not None:
+            self._cooldown_minutes = cooldown_config.as_dict()
+        elif cooldown_minutes is not None:
+            self._cooldown_minutes = cooldown_minutes
+        else:
+            self._cooldown_minutes = CooldownConfig().as_dict()
+
         self._dashboard_service = dashboard_service
+        self._metrics = metrics
 
         # Cooldown state: {patient_id: {target_role: cooldown_until_datetime}}
         self._cooldown_state: Dict[str, Dict[str, datetime]] = {}
@@ -195,10 +207,21 @@ class MetaSentinelAgent:
             ),
         )
 
-        # Step 5: Route to dashboard and notify callbacks
+        # Step 5: Record metrics
+        if self._metrics is not None:
+            self._metrics.record_decision(decision)
+
+        # Step 6: Route to dashboard and notify callbacks
         if self._dashboard_service is not None:
             self._dashboard_service.route_decision(decision)
         self._emit_decision(decision)
+
+        logger.info(
+            "Decision produced: alert=%s action=%s priority=%s",
+            alert.alert_id[:16],
+            decision.final_action,
+            decision.priority,
+        )
 
         return decision
 
@@ -313,6 +336,13 @@ class MetaSentinelAgent:
 
         if cooldown_expiry is not None and now < cooldown_expiry and not is_critical:
             # Within cooldown window and not critical: suppress
+            logger.info(
+                "Alert suppressed by cooldown for patient=%s role=%s "
+                "(expires %s)",
+                patient_id,
+                target_role,
+                cooldown_expiry.isoformat(),
+            )
             return "suppress", "low", None
 
         # Outside cooldown (or critical): proceed and set a new cooldown
