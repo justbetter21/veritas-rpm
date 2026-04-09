@@ -51,9 +51,13 @@ class DashboardService:
     -----
     dashboard = DashboardService(veritas_agent=agent, meta_sentinel=meta)
 
+    # Or wire dependencies after construction:
+    #   dashboard = DashboardService()
+    #   dashboard.set_veritas_agent(agent)
+    #   dashboard.set_meta_sentinel(meta)
+
     # Automatic routing when MetaSentinelAgent passes decisions:
     #   meta = MetaSentinelAgent(dashboard_service=dashboard)
-
     # Manual routing:
     dashboard.route_decision(system_decision)
 
@@ -96,6 +100,18 @@ class DashboardService:
 
         # Delivery log for auditability
         self._delivery_log: List[Dict] = []
+
+       # ------------------------------------------------------------------
+    # Dependency wiring
+    # ------------------------------------------------------------------
+
+    def set_veritas_agent(self, veritas_agent: object) -> None:
+        """Attach the VeritasAgent used for provenance correction feedback."""
+        self._veritas_agent = veritas_agent
+
+    def set_meta_sentinel(self, meta_sentinel: object) -> None:
+        """Attach the MetaSentinelAgent used for outcome feedback tracking."""
+        self._meta_sentinel = meta_sentinel
 
     # ------------------------------------------------------------------
     # Primary routing interface
